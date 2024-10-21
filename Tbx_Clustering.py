@@ -2,7 +2,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
-from sklearn.cluster import KMeans, DBSCAN, AgglomerativeClustering
+import umap
+from scipy.cluster.hierarchy import linkage, fcluster
+from scipy.spatial.distance import pdist
+from sklearn.cluster import DBSCAN, AgglomerativeClustering
+from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.manifold import TSNE
@@ -12,6 +16,8 @@ from sklearn.neural_network import MLPRegressor
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.preprocessing import StandardScaler
+
+from Tsbx_Exploratory import filter_resample_TS
 
 
 def scale_data(X, y = None, normalize = 'standard', split = False, test_size = 0.2, stratify = None, random_state = 42):
@@ -67,6 +73,283 @@ def scale_data(X, y = None, normalize = 'standard', split = False, test_size = 0
 
         return X_scaled_df
 
+
+def prototype_Kmeans(data, num_clusters, num_prototypes = 1):
+    """
+    Clusters consumers based on their consumption series and returns representative examples.
+
+    Parameters:
+    - data (pd.DataFrame): DataFrame containing consumption series with 'PDE' as a categorical column.
+    - num_clusters (int): Number of desired clusters (prototypes).
+    - metric (str): Distance metric to use for clustering ('euclidean', 'manhattan', 'cosine').
+    - num_prototypes (int): Number of representative examples to return for each cluster.
+
+    Returns:
+    - pd.DataFrame: DataFrame of representative examples for each cluster.
+    """
+
+    # Pivot data to create a consumption matrix
+    consumption_matrix = data.pivot(index = 'PDE', columns = 'timestamp', values = 'QTD_CONSUMO_Adjusted').fillna(-1)
+
+    # Standardize the data
+    scaler = MinMaxScaler()
+    scaled_data = scaler.fit_transform(consumption_matrix)
+
+    # Perform KMeans clustering
+    kmeans = KMeans(n_clusters = num_clusters, random_state = 42)
+    labels = kmeans.fit_predict(scaled_data)
+
+    # Add the labels back to the original DataFrame
+    consumption_matrix['Cluster'] = labels
+
+    # Get representative examples for each cluster
+    representative_examples = []
+    for cluster in range(num_clusters):
+        cluster_data = consumption_matrix[consumption_matrix['Cluster'] == cluster]
+
+        # Get the indices of the representative examples
+        # For simplicity, we can take the first few entries as examples
+        if len(cluster_data) > num_prototypes:
+            examples = cluster_data.sample(num_prototypes)  # Randomly select num_examples
+        else:
+            examples = cluster_data  # If fewer examples than required, take all
+
+        representative_examples.append(examples)
+
+    # Concatenate examples into a single DataFrame
+    representative_df = pd.concat(representative_examples)
+
+    return representative_df.reset_index()[['PDE', 'Cluster']]
+
+
+def prototype_distance(data, metric = 'euclidean', num_clusters = 3, num_prototypes = 3):
+    """
+    Clusters consumers based on their consumption series using pairwise distances.
+
+    Parameters:
+    - data (pd.DataFrame): DataFrame containing consumption series with 'PDE' as a categorical column.
+    - num_clusters (int): Number of desired clusters (prototypes).
+    - metric (str): Distance metric to use for clustering ('euclidean', 'cityblock', 'cosine').
+    - num_prototypes (int): Number of representative examples to return for each cluster.
+
+    Returns:
+    - pd.DataFrame: DataFrame of representative examples for each cluster.
+    """
+
+    # Pivot data to create a consumption matrix
+    consumption_matrix = data.pivot(index = 'PDE', columns = 'timestamp', values = 'QTD_CONSUMO_Adjusted').fillna(-1)
+
+    # Standardize the data
+    scaler = MinMaxScaler()
+    scaled_data = scaler.fit_transform(consumption_matrix)
+
+    # Compute pairwise distances
+    distance_matrix = pdist(scaled_data, metric)
+
+    # Perform hierarchical clustering
+    linkage_matrix = linkage(distance_matrix, method = 'ward')  # Using 'ward' linkage method
+    labels = fcluster(linkage_matrix, num_clusters, criterion = 'maxclust')
+
+    # Add the labels back to the original DataFrame
+    consumption_matrix['Cluster'] = labels
+
+    # Get representative examples for each cluster
+    representative_examples = []
+    for cluster in range(1, num_clusters + 1):  # Cluster labels start from 1
+        cluster_data = consumption_matrix[consumption_matrix['Cluster'] == cluster]
+
+        # Get the indices of the representative examples
+        if len(cluster_data) > num_prototypes:
+            examples = cluster_data.sample(num_prototypes)  # Randomly select num_prototypes
+        else:
+            examples = cluster_data  # If fewer examples than required, take all
+
+        representative_examples.append(examples)
+
+    # Concatenate examples into a single DataFrame
+    representative_df = pd.concat(representative_examples)
+
+    return representative_df.reset_index()[['PDE', 'Cluster']]
+
+
+def cluster_consumers(data,
+                      y_feat = 'QTD_CONSUMO_Adjusted', id_feat = 'PDE',
+                      num_clusters = 2, threshold_cluster = 0.15,
+                      method = 'distance', metric = 'cosine',
+                      ):
+    # Generate a color palette based on the number of clusters
+    palette = sns.color_palette('tab10', num_clusters)
+
+    data_resampled = filter_resample_TS(df = data, start_date = '2022-01-01',
+                                        end_date = '2025-01-01', granularity = 'M')
+
+    data_resampled_pde = filter_resample_TS(df = data, start_date = '2022-01-01',
+                                            end_date = '2025-01-01', granularity = 'M', hue_by = id_feat)
+
+    # cluster_kmeans = cluster_consumers(data_resampled_pde, num_clusters = num_clusters, num_examples = len(data_resampled_pde['PDE'].unique()))
+    if method == 'distance':
+        prototype_data = prototype_distance(data_resampled_pde, metric = metric, num_clusters = num_clusters,
+                                            num_prototypes = len(data_resampled_pde[id_feat].unique()))
+    else:
+        prototype_data = prototype_Kmeans(data_resampled_pde, num_clusters = num_clusters,
+                                          num_prototypes = len(data_resampled_pde[id_feat].unique()))
+
+    # # TODO deixar para mais de 2 clusters:
+    # cl_ratio = prototype_data['Cluster'].value_counts(normalize = True).reset_index()
+    # if len(cl_ratio[cl_ratio['proportion'] < threshold_cluster]):
+    #     data_clusters = data_resampled_pde.copy()
+    #     data_clusters['Cluster'] = 0
+    # else:
+
+    data_clusters = pd.merge(data_resampled_pde, prototype_data, on = id_feat, how = 'left')
+    data_clusters = data_clusters.sort_values(by = ['timestamp', 'Cluster'])
+
+    cl_order = data_clusters[['Cluster', 'QTD_CONSUMO_Adjusted']].groupby('Cluster').mean().reset_index()
+    max_index = cl_order['QTD_CONSUMO_Adjusted'].idxmax()
+    if cl_order.loc[max_index, 'Cluster'] == 1:
+        data_clusters['Cluster'] = data_clusters['Cluster'].replace({1: 2, 2: 1})
+
+    data_clusters['Cl1_count'] = len(data_clusters[data_clusters['Cluster'] == 1]["PDE"].unique())
+    data_clusters['Cl2_count'] = len(data_clusters[data_clusters['Cluster'] == 2]["PDE"].unique())
+
+    # Create the subplots (2 rows, 1 column) with shared y-axis
+    fig, axs = plt.subplots(2, 1, figsize = (16, 10), sharey = False)  # sharey=True for shared y-axis
+
+    # First plot with kmeans clustering
+    sns.lineplot(data = data_resampled, x = 'DATE', y = y_feat, ax = axs[0], color = 'gray', lw = 3,
+                 ls = 'dashed', alpha = 0.6)
+    sns.lineplot(data = data_clusters, x = 'DATE', y = y_feat, hue = 'Cluster',
+                 palette = palette, ax = axs[0])
+    axs[0].set_title('Cluster' + method)
+    axs[0].legend(title = 'Cluster' + method, loc = 'upper right')
+
+    # Second plot with distance-based clustering
+    # Plot the instances with transparency
+    for cluster_id in data_clusters['Cluster'].unique():
+        cluster_data_id = data_clusters[data_clusters['Cluster'] == cluster_id]
+        print(
+            f'Tamanho cluster {cluster_id}:\t{len(cluster_data_id["PDE"].unique())} / {len(data_clusters["PDE"].unique())}')
+
+        # Plot all individual instances with hue by 'PDE' and transparency
+        sns.lineplot(
+            data = cluster_data_id,
+            x = 'DATE',
+            y = y_feat,
+            hue = id_feat,  # Hue by 'PDE' for each instance
+            ax = axs[1],
+            palette = [palette[cluster_id - 1]] * len(cluster_data_id[id_feat].unique()),
+            # Assign same color for all PDEs in the cluster
+            legend = False,  # Avoid legend to prevent clutter
+            alpha = 0.15,  # Transparency for individual lines,
+            lw = .3,
+            errorbar = None
+            )
+
+        # Plot the aggregate line for the cluster
+        sns.lineplot(
+            data = cluster_data_id,
+            x = 'DATE',
+            y = y_feat,
+            ax = axs[1],
+            color = palette[cluster_id - 1],  # Same color for the cluster
+            linewidth = 5,  # Make the aggregate line thicker for visibility
+            label = f'Cluster {cluster_id}'  # Label the aggregate line
+            )
+
+    # Plot the hue with non-transparent lines for the cluster representatives
+    # sns.lineplot(data=data_tgt_cluster, x=data_tgt_cluster.index, y='QTD_CONSUMO_Adjusted', hue='Cluster_dist', palette=palette, ax=axs[1])
+
+    axs[1].set_title('Cluster' + method)
+    axs[1].legend(title = 'Cluster' + method, loc = 'upper right')
+    axs[1].get_legend().set_visible(False)
+
+    # Display the plots
+    plt.tight_layout()
+    plt.show()
+
+    return data_clusters, data_resampled
+
+def dimensionality_reduction(data_raw, method = 'tSNE', n_components = 2, get_data = False, target_column = None,
+                             random_state = 42):
+    """
+    Perform dimensionality reduction on categorical data using selected methods.
+
+    Parameters:
+    - data (DataFrame): Input DataFrame with categorical features.
+    - method (str): Method to use for dimensionality reduction ('MCA', 'tSNE', 'UMAP', 'PCA').
+    - n_components (int): Number of components to reduce to.
+    - target_column (str): Column name for coloring the plot.
+    - random_state (int): Seed for reproducibility.
+
+    Returns:
+    - reduced_data (DataFrame): DataFrame with reduced dimensions.
+    """
+
+    data = data_raw.copy()
+    # If a target column is specified, get its values for coloring
+    if target_column is not None and target_column in data.columns:
+        target_values = data[target_column].values
+        data = data.drop(columns = target_column)
+        unique_categories = pd.Categorical(target_values).categories
+    else:
+        target_values = None
+        unique_categories = None
+
+    if method == 'tSNE':
+        # t-Distributed Stochastic Neighbor Embedding
+        tsne = TSNE(n_components = n_components, random_state = random_state)
+        reduced_data = tsne.fit_transform(data)
+
+    elif method == 'UMAP':
+        # Uniform Manifold Approximation and Projection
+        reducer = umap.UMAP(n_components = n_components, random_state = random_state)
+        reduced_data = reducer.fit_transform(data)
+
+    elif method == 'PCA':
+        # Principal Component Analysis
+        pca = PCA(n_components = n_components, random_state = random_state)
+        reduced_data = pca.fit_transform(data)
+
+    else:
+        raise ValueError("Method not recognized. Choose 'tSNE', 'UMAP', or 'PCA'.")
+
+    # Return reduced data as DataFrame
+    reduced_df = pd.DataFrame(reduced_data, columns = [f'Component {i + 1}' for i in range(n_components)],
+                              index = data.index)
+
+    # df = data.reset_index(drop = True).copy()
+    data['PC1'] = reduced_df['Component 1']
+    data['PC2'] = reduced_df['Component 2']
+    data[target_column] = target_values
+
+    if not get_data:
+        # Plotting the reduced data
+        plt.figure(figsize = (8, 6))
+
+        if target_values is not None:
+            # Create a scatter plot colored by the target column
+            scatter = plt.scatter(reduced_df.iloc[:, 0], reduced_df.iloc[:, 1],
+                                  c = pd.Categorical(target_values).codes, alpha = 0.7,
+                                  cmap = 'viridis', label = unique_categories)
+            plt.colorbar(scatter, label = target_column)
+
+            # Create a legend based on unique categories
+            handles = [plt.Line2D([0], [0], marker = 'o', color = 'w', markerfacecolor = scatter.cmap(scatter.norm(i)),
+                                  markersize = 10)
+                       for i in range(len(unique_categories))]
+            plt.legend(handles, unique_categories, title = target_column)
+
+        else:
+            # Default scatter plot without coloring
+            plt.scatter(reduced_df.iloc[:, 0], reduced_df.iloc[:, 1], alpha = 0.7, label = 'No target variable')
+
+        plt.title(f'Dimensionality Reduction using {method}')
+        plt.xlabel('Component 1')
+        plt.ylabel('Component 2')
+        plt.grid()
+        plt.show()
+
+    return data
 
 
 def cluster_data(data, method = 'kmeans', n_clusters = 3, **kwargs):
@@ -170,9 +453,6 @@ def plot_silhouette(X, labels):
     return silhouette_avg
 
 
-
-
-
 def run_clustering_experiment(X, cluster_methods, seeds, cluster_range, test_size = 0.2, normalize = 'minmax'):
     # List to store results
     results = []
@@ -252,9 +532,6 @@ def select_best_clustering(data, davies_weight = 1.0, calinski_weight = .5, silh
     return sorted_data.iloc[0]
 
 
-
-
-
 def evaluate_feature_importance(X, tgt_feat):
     # Split the data into features and target (cluster labels)
     y = X[tgt_feat]
@@ -284,9 +561,6 @@ def plot_feature_importance(feature_importance_df):
     plt.xlabel('Importance Score')
     plt.ylabel('Feature')
     plt.show()
-
-
-
 
 
 def critical_investigation(df, cluster_col):

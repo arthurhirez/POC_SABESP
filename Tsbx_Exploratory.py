@@ -7,36 +7,11 @@ import matplotlib.pyplot as plt
 
 from statsmodels.tsa.seasonal import seasonal_decompose
 
-
-
 from statsmodels.tsa.stattools import acf, pacf
 from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
 
-def visualize_full_decomposition(df, variable, start_date, end_date, period = 30, granularity = 'D', model = 'additive',
-                            two_sided = False, plot_size = (14, 8), plot_corr = False):
-    """
-    Visualizes the seasonal decomposition of a specified time series variable within a date range,
-    with an option to smooth the series by changing the granularity and choose between additive or multiplicative model.
-    Includes an autocorrelation plot and combined trend + seasonal + autocorrelation analysis.
 
-    Parameters:
-    df (pd.DataFrame): DataFrame with a DatetimeIndex and numerical variables.
-    variable (str): The column name of the variable to decompose.
-    start_date (str): The start date of the period (format: 'YYYY-MM-DD').
-    end_date (str): The end date of the period (format: 'YYYY-MM-DD').
-    period (int): The period to use for decomposition (default is 30).
-    granularity (str): The resampling frequency (default is 'D' for daily).
-    model (str): The model for decomposition ('additive' or 'multiplicative'; default is 'additive').
-
-    Returns:
-    None: Displays the decomposition plots and autocorrelation analysis.
-    """
-
-    # Ensure the variable exists in the DataFrame
-    if variable not in df.columns:
-        print(f"Variable '{variable}' not found in DataFrame.")
-        return
-
+def filter_resample_TS(df, start_date, end_date, granularity = 'D', hue_by = None, agg_func = 'mean'):
     # Filter the DataFrame for the specified date range
     mask = (df.index >= start_date) & (df.index <= end_date)
     df_filtered = df.loc[mask]
@@ -46,250 +21,156 @@ def visualize_full_decomposition(df, variable, start_date, end_date, period = 30
         print(f"No data found for the specified date range: {start_date} to {end_date}.")
         return
 
-    # Resample the data based on the specified granularity and take the mean
-    df_smoothed = df_filtered[variable].resample(granularity).mean()
+    # Define a dictionary of possible aggregation functions
+    agg_functions = {
+        'mean': 'mean',
+        'sum': 'sum',
+        'min': 'min',
+        'max': 'max',
+        'median': 'median',
+        'std': 'std'
+        }
 
-    # Decomposition
-    decomposition = seasonal_decompose(df_smoothed, model = model, period = period, two_sided = two_sided)
+    # Ensure the provided agg_func is valid
+    if agg_func not in agg_functions:
+        print(f"Invalid aggregation function: {agg_func}. Using default 'mean'.")
+        agg_func = 'mean'
 
-    # Set plot size
-    plt.rcParams.update({'figure.figsize': plot_size})
+    # Resample the data based on the specified granularity and aggregation function
+    if hue_by is None:
+        df_filtered = df_filtered.select_dtypes(include = 'number')
+        df_resampled = df_filtered.resample(granularity).agg(agg_functions[agg_func])
+    else:
+        df_resampled = df_filtered.groupby(hue_by).resample(granularity).agg(agg_functions[agg_func])
 
-    if not plot_corr:
-        # Plot the chosen decomposition (Original, Trend, Seasonal, Residual)
-        fig_decomposition = decomposition.plot()
-        fig_decomposition.suptitle(f'{model.capitalize()} Decomposition', fontsize = 16)
-        plt.tight_layout()  # Adjust layout
+    df_resampled = df_resampled.reset_index()
+    df_resampled['timestamp'] = df_resampled['timestamp'].replace('2024-02-29', '2024-02-28')
+
+    # Formatting date for certain granularities
+    if 'M' in granularity:
+        df_resampled['DATE'] = df_resampled['timestamp'].dt.strftime('%m-%d')  # Month-Day format
+    elif 'W' in granularity:
+        df_resampled['DATE'] = df_resampled['timestamp'].dt.strftime('%m-%U')  # Month-Week number format
+
+    df_resampled['YEAR'] = df_resampled['timestamp'].dt.year.astype(str)
+    df_resampled = df_resampled.sort_values('timestamp')
+
+    return df_resampled
 
 
-    # Draw Plot
-    fig, axes = plt.subplots(1, 2, figsize = (16, 3), dpi = 100)
-    plot_acf(df_smoothed.dropna(), lags = 50, alpha = 0.05,  ax = axes[0])
-    plot_pacf(df_smoothed.dropna(), lags = 50, alpha = 0.05,  ax = axes[1])
+def smooth_consumption(data,
+                       tgt_feat = 'QTD_CONSUMO',
+                       ref_feat = 'QTD_CONSUMO_MEDIO',
+                       threshold = 3, limit_status = 2.75):
+    # required_columns = ['PDE', 'QTD_CONSUMO', 'QTD_CONSUMO_MEDIO']
+    # if all(col in data.columns for col in required_columns):
+    #     data_clean = data[required_columns].drop_duplicates()
+    # else:
+    #     data_clean = data
+    # First: Create a column with values 'Atenção' or 'Normal'
+    data_tgt = data.copy()
 
-    plt.tight_layout()
-    plt.show()
+    data_tgt['Status'] = data_tgt.apply(
+        lambda row: 'Atenção' if (row[tgt_feat] > limit_status * row[ref_feat] and row[ref_feat] >= threshold)
+        else 'Normal', axis = 1
+        )
 
-    if not plot_corr:
-        # Calculate and plot the sum of trend + seasonal
-        trend_plus_seasonal = decomposition.trend + decomposition.seasonal
+    # Second: Create a new column, copying QTD_CONSUMO but replacing values where QTD_CONSUMO > 10ref_feat
+    data_tgt['QTD_CONSUMO_Adjusted'] = data_tgt.apply(
+        lambda row: row[ref_feat] if (row[tgt_feat] > limit_status * row[ref_feat] and row[ref_feat] >= threshold)
+        else row[tgt_feat], axis = 1)
 
-        plt.figure(figsize = plot_size)
-        plt.plot(df_smoothed.index, df_smoothed, label = 'Original Series', color = 'blue', alpha = 0.5)
-        plt.plot(trend_plus_seasonal.index, trend_plus_seasonal, label = 'Trend + Seasonal', color = 'orange')
-        plt.title('Trend + Seasonal Components', fontsize = 16)
-        plt.xlabel('Date', fontsize = 14)
-        plt.ylabel(variable, fontsize = 14)
+    print(f"Casos ATENÇÃO!!\t{len(data_tgt[data_tgt['Status'] != 'Normal'])}")
+    return data_tgt
+
+def exploratory_processing(data, pde_list, remove_zero_consumption = False, factor_remove = 10, plot_result = False,
+                           return_removed = False):
+
+    data_tgt = data[data['COD_PDE'].isin(pde_list)].copy()
+
+    print(f'Quantidade de consumidores: {len(data_tgt["PDE"].unique())}')
+    print(f'Quantidade de observações: {data_tgt.shape[0]}')
+
+    median_consumption = data_tgt.groupby('PDE')['QTD_CONSUMO'].median().to_frame('Consumo_Mediano')
+
+    data_tgt = data_tgt.reset_index()
+    data_tgt = data_tgt.merge(median_consumption, on = 'PDE', how = 'left')
+    data_tgt.set_index('timestamp', inplace = True)
+    data_tgt.sort_index(inplace = True)
+
+    data_tgt = data_tgt[['PDE', 'QTD_CONSUMO', 'QTD_CONSUMO_MEDIO', 'Consumo_Mediano']]
+
+    data_agg = data_tgt.groupby('PDE').mean()
+    remove_pde = filter_outliers_dynamic_mean(data_agg, 'QTD_CONSUMO', factor = factor_remove)
+
+    data_clean = data_tgt[~data_tgt['PDE'].isin(remove_pde)]
+
+    if remove_zero_consumption:
+        # data_clean['PDE'] = data_clean['PDE'].astype(int)
+        # data_clean = data_clean.groupby('PDE').resample(granularity).mean().reset_index()
+        data_clean = data_clean[(data_clean['QTD_CONSUMO'] != 0) & (data_clean['QTD_CONSUMO_MEDIO'] != 0)]
+
+    if plot_result:
+        plt.figure(figsize = (15, 4))  # Control the size of the plot here
+
+        # Create the histogram
+        ax = sns.histplot(data = data_clean, x = data_clean.index, y = 'QTD_CONSUMO', bins = 100, stat = 'count',
+                          alpha = 0.5)
+
+        # Calculate the mean QTD_CONSUMO for each date (x value) & Plot the mean line
+        mean_values = data_clean.groupby(data_clean.index)['QTD_CONSUMO'].mean()
+        plt.plot(mean_values.index, mean_values.values, color = 'red', linestyle = '--', label = 'Mean QTD_CONSUMO')
+
+        # Calculate the median QTD_CONSUMO for each date (x value) & Plot the median line
+        median_values = data_clean.groupby(data_clean.index)['QTD_CONSUMO'].median()
+        plt.plot(median_values.index, median_values.values, color = 'blue', linestyle = '--',
+                 label = 'Median QTD_CONSUMO')
+
+        # Add labels and title if needed
+        plt.xlabel('Date')
+        plt.ylabel('QTD_CONSUMO')
+        plt.title('Histogram of QTD_CONSUMO with Mean Line')
         plt.legend()
-        plt.tight_layout()
+        # Show the plot
         plt.show()
 
+    if return_removed: return data_clean, remove_pde
+    return data_clean
 
 
+def filter_outliers_dynamic_mean(df, column, factor = 50):
+    filtered_df = df.copy()
+    excluded_cases = pd.DataFrame()  # DataFrame to hold excluded cases
+
+    while True:
+        # Step 1: Calculate the mean of the remaining values
+        mean_consumption = filtered_df[column].mean()
+
+        # Step 2: Define the outlier threshold
+        outlier_threshold = mean_consumption * factor
+
+        # Step 3: Identify outliers
+        outliers = filtered_df[filtered_df[column] > outlier_threshold]
+
+        # Step 4: Filter out outliers
+        new_filtered_df = filtered_df[filtered_df[column] <= outlier_threshold]
+
+        # Step 5: Append the outliers to the excluded_cases DataFrame
+        excluded_cases = pd.concat([excluded_cases, outliers])
+
+        # If no change in DataFrame, break the loop
+        if new_filtered_df.shape[0] == filtered_df.shape[0]:
+            break
+
+        filtered_df = new_filtered_df  # Update filtered DataFrame
+
+    print(excluded_cases.reset_index()['PDE'].tolist())
+
+    return excluded_cases.reset_index()['PDE'].tolist()
 
 
-
-def visualize_timeseries(df, start_date, end_date, variable, granularity = 'H'):
-    """
-    Visualizes the time series data for a specific variable and time period, with adjustable granularity.
-
-    Parameters:
-    df (pd.DataFrame): DataFrame with a DatetimeIndex and numerical variables.
-    start_date (str): The start date of the period (format: 'YYYY-MM-DD').
-    end_date (str): The end date of the period (format: 'YYYY-MM-DD').
-    variable (str): The column name of the variable to plot.
-    granularity (str): The resampling frequency (e.g., 'H' for hourly, 'D' for daily, 'W' for weekly, etc.).
-
-    Returns:
-    None: Displays the plot.
-    """
-
-    # Filter the DataFrame for the specified time period
-    mask = (df.index >= start_date) & (df.index <= end_date)
-    df_filtered = df.loc[mask]
-
-    # Check if the variable exists in the DataFrame
-    if variable not in df.columns:
-        print(f"Variable '{variable}' not found in DataFrame.")
-        return
-
-    # Resample the data based on the chosen granularity
-    df_resampled = df_filtered[variable].resample(granularity).mean()
-
-    # Plot the time series data
-    plt.figure(figsize = (10, 6))
-    plt.plot(df_resampled.index, df_resampled, marker = 'o', linestyle = '-')
-
-    # Set plot title and labels
-    plt.title(f'Time Series of {variable} from {start_date} to {end_date} ({granularity} granularity)', fontsize = 14)
-    plt.xlabel('Date', fontsize = 12)
-    plt.ylabel(variable, fontsize = 12)
-
-    # Rotate the x-axis labels for better readability
-    plt.xticks(rotation = 45)
-
-    # Show grid and plot
-    plt.grid(True)
-    plt.tight_layout()
-
-    # Display the plot
-    plt.show()
-
-def visualize_decomposition(df, variable, start_date, end_date, period = 30, granularity = 'D', model = 'additive',
-                            two_sided = False, plot_size = (14, 8)):
-    """
-    Visualizes the seasonal decomposition of a specified time series variable within a date range,
-    with an option to smooth the series by changing the granularity and choose between additive or multiplicative model.
-
-    Parameters:
-    df (pd.DataFrame): DataFrame with a DatetimeIndex and numerical variables.
-    variable (str): The column name of the variable to decompose.
-    start_date (str): The start date of the period (format: 'YYYY-MM-DD').
-    end_date (str): The end date of the period (format: 'YYYY-MM-DD').
-    period (int): The period to use for decomposition (default is 30).
-    granularity (str): The resampling frequency (default is 'D' for daily).
-        Common options include:
-            'H': Hourly
-            'D': Daily (default)
-            'W': Weekly
-            'M': Monthly
-    model (str): The model for decomposition ('additive' or 'multiplicative'; default is 'additive').
-
-    Returns:
-    None: Displays the decomposition plots.
-    """
-
-    # Ensure the variable exists in the DataFrame
-    if variable not in df.columns:
-        print(f"Variable '{variable}' not found in DataFrame.")
-        return
-
-    # Filter the DataFrame for the specified date range
-    mask = (df.index >= start_date) & (df.index <= end_date)
-    df_filtered = df.loc[mask]
-
-    # Check if the filtered DataFrame is not empty
-    if df_filtered.empty:
-        print(f"No data found for the specified date range: {start_date} to {end_date}.")
-        return
-
-    # Resample the data based on the specified granularity and take the mean
-    df_smoothed = df_filtered[variable].resample(granularity).mean()
-
-    # Decomposition
-    decomposition = seasonal_decompose(df_smoothed, model = model, period = period, two_sided = two_sided)
-
-    # Set plot size
-    plt.rcParams.update({'figure.figsize': plot_size})
-
-    # Plot the chosen decomposition
-    fig_decomposition = decomposition.plot()
-    fig_decomposition.suptitle(f'{model.capitalize()} Decomposition', fontsize = 16)
-    plt.tight_layout()  # Adjust layout
-
-    # Calculate and plot the sum of trend + seasonal
-    trend_plus_seasonal = decomposition.trend + decomposition.seasonal
-
-    plt.figure(figsize = plot_size)
-    plt.plot(df_smoothed.index, df_smoothed, label = 'Original Series', color = 'blue', alpha = 0.5)
-    plt.plot(trend_plus_seasonal.index, trend_plus_seasonal, label = 'Trend + Seasonal', color = 'orange')
-    plt.title('Trend + Seasonal Components', fontsize = 16)
-    plt.xlabel('Date', fontsize = 14)
-    plt.ylabel(variable, fontsize = 14)
-    plt.legend()
-    plt.tight_layout()
-    plt.show()
-
-
-def transform_time_series(data, transformation = 'none'):
-    """
-    Apply a specified transformation to a time series data.
-
-    Parameters:
-        data (pd.Series): The time series data to transform.
-        transformation (str): The type of transformation to apply. Options are
-                              'box-cox', 'log', 'sqrt', and 'none'.
-
-    Returns:
-        pd.Series: The transformed time series.
-    """
-    if not isinstance(data, pd.Series):
-        raise ValueError("Input data must be a pandas Series.")
-
-    if transformation == 'box-cox':
-        # Box-Cox transformation requires all values to be positive
-        if (data <= 0).any():
-            raise ValueError("All values must be positive for Box-Cox transformation.")
-        transformed_data, lambda_ = stats.boxcox(data)
-        print('box')
-        return pd.Series(transformed_data, index = data.index), lambda_
-        print('cox')
-    elif transformation == 'log':
-        if (data <= 0).any():
-            raise ValueError("All values must be positive for log transformation.")
-        transformed_data = np.log(data)
-        return pd.Series(transformed_data, index = data.index)
-
-    elif transformation == 'sqrt':
-        transformed_data = np.sqrt(data)
-        return pd.Series(transformed_data, index = data.index)
-
-    elif transformation == 'none':
-        return data
-
-    else:
-        raise ValueError("Invalid transformation specified. Choose from 'box-cox', 'log', 'sqrt', or 'none'.")
-
-
-
-import pandas as pd
-import numpy as np
-from scipy import stats
-
-def transform_time_series_diff(data, transformation='none', granularity = 'M', diff_order=0):
-    """
-    Apply a specified transformation to a time series data, including differentiation.
-
-    Parameters:
-        data (pd.Series): The time series data to transform.
-        transformation (str): The type of transformation to apply. Options are
-                              'box-cox', 'log', 'sqrt', 'none'.
-        diff_order (int): The order of differencing to apply (0 for no differencing).
-
-    Returns:
-        pd.Series: The transformed time series.
-    """
-    if not isinstance(data, pd.Series):
-        raise ValueError("Input data must be a pandas Series.")
-
-    # Apply specified transformation
-    if transformation == 'box-cox':
-        # Box-Cox transformation requires all values to be positive
-        if (data <= 0).any():
-            raise ValueError("All values must be positive for Box-Cox transformation.")
-        transformed_data, lambda_ = stats.boxcox(data)
-        data = pd.Series(transformed_data, index=data.index)
-    elif transformation == 'log':
-        if (data <= 0).any():
-            raise ValueError("All values must be positive for log transformation.")
-        data = np.log(data)
-    elif transformation == 'sqrt':
-        data = np.sqrt(data)
-    elif transformation != 'none':
-        raise ValueError("Invalid transformation specified. Choose from 'box-cox', 'log', 'sqrt', or 'none'.")
-
-    # Apply differencing
-    if diff_order > 0:
-        df_smoothed = data.resample(granularity).mean()
-        data = df_smoothed.diff(periods=diff_order).dropna()
-
-    return data
-
-# Example usage
-# transformed_data = transform_time_series(your_series, transformation='log', diff_order=1)
-
-
-def plot_hued_by_year(df, variable, start_date, end_date, granularity = 'D'):
+def plot_hued_by_year(data, variable, start_date, end_date, granularity = 'D', adjust_consumption = True,
+                      exclude_case = None):
     """
     Plots a time series line plot hued by year, for a given time period and granularity.
     The x-axis shows the months, and each year is plotted on the same time scale.
@@ -311,31 +192,40 @@ def plot_hued_by_year(df, variable, start_date, end_date, granularity = 'D'):
     """
 
     # Ensure the variable exists in the DataFrame
-    if variable not in df.columns:
+    if variable not in data.columns:
         print(f"Variable '{variable}' not found in DataFrame.")
         return
 
-    # Filter the DataFrame for the specified date range
-    mask = (df.index >= start_date) & (df.index <= end_date)
-    df_filtered = df.loc[mask]
+    df_resampled = filter_resample_TS(data, start_date, end_date, granularity)
 
-    # Check if the filtered DataFrame is not empty
-    if df_filtered.empty:
-        print(f"No data found for the specified date range: {start_date} to {end_date}.")
-        return
-
-    df_filtered.index = pd.to_datetime(df_filtered.index)
-
-    # Resample the data based on the specified granularity
-    df_resampled = df_filtered.resample(granularity).mean()
+    if isinstance(exclude_case, dict):
+        for var, value in exclude_case.items():
+            # print(var, value)
+            df_resampled = df_resampled[df_resampled[var] != value]
 
     # Extract the year, month, and day for plotting
-    df_resampled['Year'] = df_resampled.index.year
-    df_resampled['Month-Day'] = df_resampled.index.strftime('%m-%d')  # Ignore the year part, keep month-day
+    # df_resampled['Year'] = df_resampled.index.year
+    # df_resampled['Month-Day'] = df_resampled.index.strftime('%m-%d').astype(str)  # Ignore the year part, keep month-day
 
     # Plot using Seaborn
-    plt.figure(figsize = (16, 8))
-    sns.lineplot(data = df_resampled, x = 'Month-Day', y = variable, hue = 'Year', palette = 'magma')
+
+    if adjust_consumption:
+        fig, axs = plt.subplots(2, 1, figsize = (12, 6), sharey = True)  # sharey=True for shared y-axis
+
+        # First plot with title
+        sns.lineplot(data = df_resampled, x = 'DATE', y = 'QTD_CONSUMO', hue = 'YEAR', palette = 'magma', ax = axs[0])
+        axs[0].set_title('Consumption over Time')
+
+        # Second plot with title
+        sns.lineplot(data = df_resampled, x = 'DATE', y = 'QTD_CONSUMO_Adjusted', hue = 'YEAR', palette = 'magma',
+                     ax = axs[1])
+        axs[1].set_title('Adjusted Consumption over Time')
+
+    else:
+        plt.figure(figsize = (16, 8))
+        sns.lineplot(data = df_resampled, x = 'DATE', y = variable, hue = 'YEAR', palette = 'magma')
+    # Set x-axis limits to start and end at the beginning and end of the year
+    # plt.xlim('01-01', '12-31')  # Limit x-axis to month-day format
 
     plt.title(f'{variable} Trend by Year (Aligned by Month-Day)', fontsize = 16)
     plt.xlabel('Month-Day', fontsize = 14)
@@ -343,62 +233,5 @@ def plot_hued_by_year(df, variable, start_date, end_date, granularity = 'D'):
     plt.xticks(rotation = 45)  # Rotate x-axis labels for better readability
     plt.legend(title = 'Year')
     plt.grid(True)
-    plt.tight_layout()
-    plt.show()
-
-def plot_monthly_facets(df, variable, start_date, end_date, granularity = 'D', specific_years = [2014, 2018, 2022]):
-    """
-    Plots 12 subplots, one for each month, showing the trend of the specified variable for each year.
-
-    Parameters:
-    df (pd.DataFrame): DataFrame with a DatetimeIndex and numerical variables.
-    variable (str): The column name of the variable to plot.
-    start_date (str): The start date of the period (format: 'YYYY-MM-DD').
-    end_date (str): The end date of the period (format: 'YYYY-MM-DD').
-    granularity (str): The resampling frequency (default is 'D' for daily).
-    specific_years (list): A list of specific years to show as x-axis ticks (e.g., [2014, 2018, 2022]).
-
-    Returns:
-    None: Displays the line plots.
-    """
-
-    # Ensure the variable exists in the DataFrame
-    if variable not in df.columns:
-        print(f"Variable '{variable}' not found in DataFrame.")
-        return
-
-    # Filter the DataFrame for the specified date range
-    mask = (df.index >= start_date) & (df.index <= end_date)
-    df_filtered = df.loc[mask]
-
-    # Check if the filtered DataFrame is not empty
-    if df_filtered.empty:
-        print(f"No data found for the specified date range: {start_date} to {end_date}.")
-        return
-
-    # Resample the data based on the specified granularity
-    df_resampled = df_filtered.resample(granularity).mean()
-
-    # Extract the year and month for plotting
-    df_resampled['Year'] = df_resampled.index.year
-    df_resampled['Month'] = df_resampled.index.month
-
-    # Create a FacetGrid for 12 months
-    g = sns.FacetGrid(df_resampled, col = 'Month', col_wrap = 12, height = 4, aspect = .5)
-
-    # Map the lineplot to each facet
-    g = g.map(sns.lineplot, 'Year', variable, marker = "o")
-
-    # Control the x-axis ticker labels
-    if specific_years is not None:
-        for ax in g.axes.flatten():
-            ax.set_xticks(specific_years)  # Set specific ticks
-            ax.set_xticklabels(specific_years, rotation = 45)  # Set the labels and rotate them
-
-    # Set titles and axis labels
-    g.set_titles(col_template = "{col_name}")
-    g.set_axis_labels('Year', variable)
-
-    # Adjust layout
     plt.tight_layout()
     plt.show()
